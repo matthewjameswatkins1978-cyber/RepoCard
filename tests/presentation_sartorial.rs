@@ -6,7 +6,9 @@
 
 use repocard::presentation::sartorial as present;
 use repocard::{scan, RepoSnapshot, ScanOptions};
-use sartorial::{Config, MotionMode, Preset, RenderContext, RenderTarget, Status};
+use sartorial::{
+    ColorChoice, Config, MotionMode, Preset, RenderContext, RenderTarget, Status, SymbolMode,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -151,7 +153,7 @@ fn plain_has_no_ansi_and_keeps_facts() {
     }
 }
 
-/// 5. All four presets preserve the same essential semantic content.
+/// 5. All four presets preserve the same essential semantic content (needles are preset-aware for Workwear operator voice).
 #[test]
 fn presets_preserve_semantic_content() {
     let t = git_repo(true);
@@ -160,14 +162,18 @@ fn presets_preserve_semantic_content() {
         let out = run(t.path(), &["--style", style]);
         assert!(out.status.success(), "{style} stderr: {}", stderr(&out));
         let text = stdout(&out);
-        for needle in [
-            root.as_str(),
-            "Branch",
-            "main",
-            "Files",
-            "Attention",
-            "modified",
-        ] {
+        let labels: &[&str] = if style == "workwear" {
+            &["BRANCH:", "FILES:", "ATTENTION:"]
+        } else {
+            &["Branch", "Files", "Attention"]
+        };
+        for needle in labels {
+            assert!(
+                text.contains(needle),
+                "{style}: missing {needle:?} in:\n{text}"
+            );
+        }
+        for needle in [root.as_str(), "main", "modified"] {
             assert!(
                 text.contains(needle),
                 "{style}: missing {needle:?} in:\n{text}"
@@ -203,7 +209,10 @@ fn presets_differ_visually() {
             text.contains('\x1b'),
             "{preset:?} should style human output"
         );
-        assert!(text.contains("Files"), "{preset:?} lost semantic content");
+        assert!(
+            text.contains("Files") || text.contains("FILES:"),
+            "{preset:?} lost semantic content"
+        );
         rendered.push(text);
     }
     for i in 0..rendered.len() {
@@ -421,4 +430,200 @@ fn spaced_unicode_paths_render() {
         .as_str()
         .unwrap()
         .contains("my repo"));
+}
+
+/// 16. Machine JSON is identical across presentation flags on one fixture.
+#[test]
+fn json_identical_across_styles() {
+    let t = plain_dir();
+    let mut bodies = Vec::new();
+    for args in [
+        vec!["--json"],
+        vec!["--json", "--style", "house"],
+        vec!["--json", "--style", "black-tie"],
+        vec!["--json", "--style", "workwear"],
+        vec!["--json", "--style", "studio"],
+    ] {
+        let out = run(t.path(), &args);
+        assert!(out.status.success(), "{args:?} stderr: {}", stderr(&out));
+        assert!(
+            stderr(&out).is_empty(),
+            "{args:?} JSON stderr must be silent"
+        );
+        let text = stdout(&out);
+        assert!(
+            !text.contains('\x1b'),
+            "{args:?} JSON must not contain ANSI"
+        );
+        let v: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(
+            v["schema_version"], "repocard.v0.1",
+            "{args:?} schema drift"
+        );
+        bodies.push(text);
+    }
+    for (i, body) in bodies.iter().enumerate().skip(1) {
+        assert_eq!(*body, bodies[0], "JSON differs for style combo {i}");
+    }
+}
+
+fn structural_ctx(preset: Preset) -> RenderContext {
+    // Human target, colour off, full glyphs, fixed width: differences left
+    // standing are structural, never ANSI.
+    RenderContext::detect()
+        .with_config(
+            Config::default()
+                .with_preset(preset)
+                .with_color(ColorChoice::Never)
+                .with_symbols(SymbolMode::Unicode)
+                .with_width(100),
+        )
+        .with_target(RenderTarget::Human)
+}
+
+fn render_structural(preset: Preset, snap: &RepoSnapshot) -> String {
+    let screen = present::summary_screen(snap);
+    let mut buf = Vec::new();
+    sartorial::RenderHuman::render_human(&screen, &structural_ctx(preset), &mut buf).unwrap();
+    String::from_utf8(buf).unwrap()
+}
+
+/// 17. v0.2 preset grammars survive the adapter as structure, not colour.
+#[test]
+fn preset_grammars_are_structural() {
+    let t = plain_dir();
+    let snap = scan_snapshot(t.path());
+    let house = render_structural(Preset::House, &snap);
+    let black_tie = render_structural(Preset::BlackTie, &snap);
+    let workwear = render_structural(Preset::Workwear, &snap);
+    let studio = render_structural(Preset::Studio, &snap);
+
+    // Same facts everywhere (values never change voice).
+    for (name, out) in [
+        ("house", &house),
+        ("black-tie", &black_tie),
+        ("workwear", &workwear),
+        ("studio", &studio),
+    ] {
+        for needle in ["TODO 1", "FIXME 1", "2 files", "READY"] {
+            assert!(out.contains(needle), "{name}: lost fact {needle:?}:\n{out}");
+        }
+    }
+
+    // HOUSE: uppercase title, inline bounded status, ordinary fact labels,
+    // no operator marker.
+    let first = house.lines().next().unwrap_or("");
+    assert!(
+        first.starts_with("REPOCARD:"),
+        "house title casing:\n{house}"
+    );
+    assert!(
+        house
+            .lines()
+            .any(|l| l.contains("Status") && l.contains("READY")),
+        "house inline status:\n{house}"
+    );
+    assert!(house.contains("Root"), "house ordinary labels:\n{house}");
+    assert!(
+        !house
+            .lines()
+            .any(|l| l.starts_with("» ") || l.starts_with("> ")),
+        "house must not use the operator marker:\n{house}"
+    );
+
+    // BLACK TIE: preserved-case title, restrained title rule, stacked status.
+    let first = black_tie.lines().next().unwrap_or("");
+    assert!(
+        first.starts_with("RepoCard:"),
+        "black-tie title preserves case:\n{black_tie}"
+    );
+    assert!(
+        black_tie
+            .lines()
+            .take(4)
+            .any(|l| !l.is_empty() && l.chars().all(|c| c == '─')),
+        "black-tie title rule:\n{black_tie}"
+    );
+    assert!(
+        black_tie.lines().any(|l| l.trim() == "Status"),
+        "black-tie stacked status:\n{black_tie}"
+    );
+
+    // WORKWEAR: operator marker, uppercase colon labels, tightest output.
+    let first = workwear.lines().next().unwrap_or("");
+    assert!(
+        first.starts_with("» REPOCARD:"),
+        "workwear operator title:\n{workwear}"
+    );
+    for needle in ["ROOT:", "FILES:", "ATTENTION:"] {
+        assert!(
+            workwear.contains(needle),
+            "workwear {needle:?}:\n{workwear}"
+        );
+    }
+    let blanks = |s: &str| s.lines().filter(|l| l.trim().is_empty()).count();
+    assert!(
+        blanks(&workwear) < blanks(&house),
+        "workwear must be tighter than house"
+    );
+
+    // STUDIO: preserved-case title, stacked status, clearly more air.
+    let first = studio.lines().next().unwrap_or("");
+    assert!(
+        first.starts_with("RepoCard:"),
+        "studio title preserves case:\n{studio}"
+    );
+    assert!(
+        studio.lines().any(|l| l.trim() == "Status"),
+        "studio stacked status:\n{studio}"
+    );
+    assert!(
+        studio.lines().count() > house.lines().count(),
+        "studio must carry more vertical air than house"
+    );
+
+    // All four silhouettes differ with colour disabled.
+    let all = [&house, &black_tie, &workwear, &studio];
+    for i in 0..all.len() {
+        for j in (i + 1)..all.len() {
+            assert_ne!(all[i], all[j], "silhouettes {i} and {j} identical");
+        }
+    }
+}
+
+/// 18. Workwear plain output stays boring, readable and pipe-safe.
+#[test]
+fn workwear_plain_is_pipe_safe() {
+    let t = git_repo(false);
+    let out = run(t.path(), &["--plain", "--style", "workwear"]);
+    assert!(out.status.success(), "stderr: {}", stderr(&out));
+    let text = stdout(&out);
+    assert!(!text.contains('\x1b'), "plain must not contain ANSI");
+    // No Unicode *structural* leakage: framework markers, badges, rules and
+    // key glyphs must all be ASCII. (Fact *values* such as the middle dot in
+    // "N files · M bytes" are RepoCard content, not framework grammar, and
+    // are unchanged by this adoption.)
+    for glyph in ['»', '✓', '×', '●', '○', '–', '─', '↑', '↓', '←', '→'] {
+        assert!(!text.contains(glyph), "plain leaked {glyph:?}:\n{text}");
+    }
+    assert!(text.contains("> "), "ASCII operator marker:\n{text}");
+    for needle in ["BRANCH:", "FILES:", "main"] {
+        assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+    }
+}
+
+/// 19. The binary reports the Cargo package version (version truth).
+#[test]
+fn version_reports_cargo_package_version() {
+    let out = Command::new(bin())
+        .arg("--version")
+        .output()
+        .expect("spawn repocard");
+    assert!(out.status.success());
+    let text = stdout(&out);
+    assert_eq!(
+        text.trim(),
+        format!("repocard {}", env!("CARGO_PKG_VERSION")),
+        "binary must report its Cargo package version"
+    );
 }

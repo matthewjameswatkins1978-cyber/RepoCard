@@ -1,6 +1,6 @@
 [package]
 name = "repocard"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Small, fast repository intelligence card"
 publish = false
@@ -23,10 +23,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 wait-timeout = "0.2"
-# Real Sartorial dependency, pinned to the merged v0.1 commit. No default
+# Real Sartorial dependency, pinned to the merged v0.2 commit. No default
 # features: RepoCard defines its own CLI surface and only needs presentation
 # types, so Sartorial's optional clap integration stays off.
-sartorial = { git = "https://github.com/matthewjameswatkins1978-cyber/Sartorial", rev = "eb44f2300e66d64ff318b24f9e87fb5fad1092b6", default-features = false }
+sartorial = { git = "https://github.com/matthewjameswatkins1978-cyber/Sartorial", rev = "2cfbcd16e7c1c90b27310009fddd49101b904331", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
