@@ -45,17 +45,21 @@ impl GitRunner {
         let status = match child.wait_timeout(self.timeout) {
             Ok(Some(s)) => s,
             Ok(None) => {
-                // Timeout: kill, then wait to reap. Pipe readers observe EOF
-                // once the child dies, so the joins below always terminate.
-                // No Git process is left behind on any platform.
-                let _ = child.kill();
+                // Timeout: kill the whole process tree, then wait to reap the
+                // direct child. A plain `kill()` is not enough: on Windows
+                // `git.exe` re-executes subcommands (e.g. `git-daemon.exe`)
+                // which inherit the pipes; killing only the parent would leave
+                // a grandchild serving forever with our pipe ends open, and
+                // the drain joins below would block forever. No Git process is
+                // left behind on any platform.
+                kill_tree(&mut child);
                 let _ = child.wait();
                 let _ = out_handle.join();
                 let _ = err_handle.join();
                 return Err("git timed out".to_string());
             }
             Err(e) => {
-                let _ = child.kill();
+                kill_tree(&mut child);
                 let _ = child.wait();
                 let _ = out_handle.join();
                 let _ = err_handle.join();
@@ -73,7 +77,6 @@ impl GitRunner {
         })
     }
 }
-
 /// Drain one optional pipe to a bounded buffer. Never blocks the waiter.
 fn drain_capped<R: Read>(pipe: Option<R>) -> Vec<u8> {
     let mut buf = Vec::new();
@@ -84,6 +87,21 @@ fn drain_capped<R: Read>(pipe: Option<R>) -> Vec<u8> {
     }
     buf.truncate(MAX_CAPTURE_BYTES as usize);
     buf
+}
+
+/// Kill a child and any grandchildren it spawned (direct argv, no shell).
+/// Falls back to a plain kill if the tree kill cannot run.
+fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        let _ = Command::new("taskkill")
+            .args(["/F", "/T", "/PID", &child.id().to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    let _ = child.kill();
 }
 
 #[derive(Debug)]
