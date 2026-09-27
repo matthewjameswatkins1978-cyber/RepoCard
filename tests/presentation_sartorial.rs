@@ -355,10 +355,11 @@ fn motion_never_suppresses_animation() {
 #[test]
 fn dry_run_renders_plan_and_writes_nothing() {
     let t = plain_dir();
-    // The binary canonicalizes the root before planning; compare against the
-    // same canonical destination it displays (8.3 aliases, junctions, ...).
+    // The binary canonicalizes the root before planning and strips the
+    // `\\?\` prefix for display; mirror exactly that for the comparison.
     let canon = std::fs::canonicalize(t.path()).unwrap();
     let dest = canon.join(".repocard").join("report.json");
+    let dest_shown = repocard::display_root(&dest);
     let out = Command::new(bin())
         .arg("write")
         .arg(t.path())
@@ -369,7 +370,7 @@ fn dry_run_renders_plan_and_writes_nothing() {
     let text = stdout(&out);
     assert!(text.contains("Dry run"), "plan marker missing:\n{text}");
     assert!(
-        text.contains(dest.to_string_lossy().as_ref()),
+        text.contains(dest_shown.as_str()),
         "destination missing:\n{text}"
     );
     assert!(!dest.exists(), "dry-run must not write");
@@ -381,6 +382,7 @@ fn write_receipt_reflects_actual_result() {
     let t = plain_dir();
     let canon = std::fs::canonicalize(t.path()).unwrap();
     let dest = canon.join(".repocard").join("report.json");
+    let dest_shown = repocard::display_root(&dest);
     let out = Command::new(bin())
         .arg("write")
         .arg(t.path())
@@ -389,7 +391,7 @@ fn write_receipt_reflects_actual_result() {
     assert!(out.status.success(), "stderr: {}", stderr(&out));
     let text = stdout(&out);
     assert!(
-        text.contains(dest.to_string_lossy().as_ref()),
+        text.contains(dest_shown.as_str()),
         "receipt destination missing:\n{text}"
     );
     let raw = fs::read_to_string(&dest).expect("report written");
