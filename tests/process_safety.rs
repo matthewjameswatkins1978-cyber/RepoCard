@@ -1,6 +1,11 @@
 use repocard::scan::GitRunner;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// Serialise daemon spawns: parallel `taskkill /T` tree-kills plus Windows
+/// PID reuse must never let one test's cleanup touch another test's child.
+static DAEMON_LOCK: Mutex<()> = Mutex::new(());
 
 /// A hanging child must be killed and reaped: `run` returns a timeout error
 /// promptly and no Git process remains.
@@ -27,6 +32,7 @@ fn daemon_args(base: &std::path::Path) -> Vec<String> {
 
 #[test]
 fn timeout_kills_child_and_returns_promptly() {
+    let _guard = DAEMON_LOCK.lock().unwrap();
     let t = TempDir::new().unwrap();
     let runner = daemon_runner(Duration::from_millis(500));
     let args = daemon_args(t.path());
@@ -46,12 +52,19 @@ fn timeout_kills_child_and_returns_promptly() {
 
 #[test]
 fn timeout_leaves_runner_usable() {
-    // After a kill+reap cycle the runner must still work (no wedged state).
+    // After a kill+reap cycle the same runner must still work (no wedged
+    // state). Only one daemon is ever launched here; the follow-ups are fast
+    // deterministic commands, so this cannot flake on a second spawn.
+    let _guard = DAEMON_LOCK.lock().unwrap();
     let t = TempDir::new().unwrap();
-    let killer = daemon_runner(Duration::from_millis(300));
+    let runner = daemon_runner(Duration::from_millis(300));
     let args = daemon_args(t.path());
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    assert!(killer.run(t.path(), &arg_refs).is_err());
+    assert!(runner.run(t.path(), &arg_refs).is_err());
+    let version = runner
+        .run(t.path(), &["--version"])
+        .expect("runner usable after timeout");
+    assert!(version.success);
     let missing = GitRunner {
         program: "repocard-nonexistent-git-binary-xyz".to_string(),
         timeout: Duration::from_secs(5),
