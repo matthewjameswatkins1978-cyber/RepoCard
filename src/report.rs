@@ -1,5 +1,8 @@
 use crate::model::{RepoCardError, RepoSnapshot, ReportPlan, ReportReceipt, SCHEMA_VERSION};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static BACKUP_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn default_destination(root: &Path) -> PathBuf {
     root.join(".repocard").join("report.json")
@@ -38,34 +41,16 @@ pub fn write_report(
     let json = serde_json::to_string_pretty(snapshot)
         .map_err(|e| RepoCardError::Scan(format!("serialize snapshot: {e}")))?;
 
-    // Fully produce the new JSON in a sibling temp file first. `write`
-    // returns only once all bytes are on disk (or errors with nothing
-    // partially promised). The final path is then touched exactly once, by
-    // rename. There is deliberately NO fallback to direct overwrite: on
-    // Windows especially, a failed direct write could leave a half-written
-    // final report next to a lost original.
+    // Fully produce the new JSON in a sibling temp file first.
     let tmp = destination.with_extension("json.tmp");
     if let Err(e) = std::fs::write(&tmp, json.as_bytes()) {
         let _ = std::fs::remove_file(&tmp);
         return Err(RepoCardError::Io(format!("write temp report: {e}")));
     }
     let bytes_written = json.len() as u64;
-    if destination.exists() {
-        // Windows rename cannot replace an existing file, so remove the old
-        // report first. If removal fails the old report is untouched and the
-        // temp file remains for inspection. If rename then fails, the worst
-        // case is a missing final report plus an intact temp file -- never a
-        // half-written final report.
-        if let Err(e) = std::fs::remove_file(destination) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(RepoCardError::Io(format!(
-                "replace previous report (old report left intact): {e}"
-            )));
-        }
-    }
-    if let Err(e) = std::fs::rename(&tmp, destination) {
+    if let Err(e) = replace_report(&tmp, destination, |from, to| std::fs::rename(from, to)) {
         return Err(RepoCardError::Io(format!(
-            "rename temp report into place (final report not half-written; temp may remain): {e}"
+            "replace report (previous report is preserved at its original or recovery path): {e}"
         )));
     }
     Ok(ReportReceipt {
@@ -73,4 +58,79 @@ pub fn write_report(
         bytes_written,
         schema_version: SCHEMA_VERSION.to_string(),
     })
+}
+
+fn replace_report<F>(tmp: &Path, destination: &Path, mut rename: F) -> std::io::Result<()>
+where
+    F: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    if !destination.exists() {
+        return rename(tmp, destination);
+    }
+    if !std::fs::symlink_metadata(destination)?
+        .file_type()
+        .is_file()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "report destination is not a regular file",
+        ));
+    }
+
+    // Windows rename cannot replace an existing file. Move the old report to
+    // a unique sibling first, then install the fully written temp. If install
+    // fails, restore the old report; if restoration also fails, leave it at
+    // the explicit backup path instead of deleting the only good copy.
+    let id = BACKUP_ID.fetch_add(1, Ordering::Relaxed);
+    let backup = destination.with_extension(format!("json.{}.{}.bak", std::process::id(), id));
+    rename(destination, &backup)?;
+    if let Err(install_error) = rename(tmp, destination) {
+        return match rename(&backup, destination) {
+            Ok(()) => Err(install_error),
+            Err(restore_error) => Err(std::io::Error::new(
+                restore_error.kind(),
+                format!(
+                    "install failed ({install_error}); restore failed ({restore_error}); old report remains at {}",
+                    backup.display()
+                ),
+            )),
+        };
+    }
+    // New report is now installed. Backup cleanup is best-effort; a leftover
+    // backup is recoverable and safer than turning a successful write into loss.
+    let _ = std::fs::remove_file(backup);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_report;
+    use std::cell::Cell;
+    use std::fs;
+    use std::io;
+    use tempfile::TempDir;
+
+    #[test]
+    fn failed_install_restores_previous_report() {
+        let dir = TempDir::new().unwrap();
+        let old = dir.path().join("report.json");
+        let tmp = dir.path().join("report.json.tmp");
+        fs::write(&old, b"old report").unwrap();
+        fs::write(&tmp, b"new report").unwrap();
+        let calls = Cell::new(0);
+
+        let result = replace_report(&tmp, &old, |from, to| {
+            let n = calls.get() + 1;
+            calls.set(n);
+            if n == 2 {
+                return Err(io::Error::other("simulated install failure"));
+            }
+            fs::rename(from, to)
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&old).unwrap(), b"old report");
+        assert_eq!(fs::read(&tmp).unwrap(), b"new report");
+        assert_eq!(calls.get(), 3, "old report should be restored");
+    }
 }

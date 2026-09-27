@@ -92,11 +92,20 @@ impl GitRunner {
 fn drain_capped<R: Read>(pipe: Option<R>) -> Vec<u8> {
     let mut buf = Vec::new();
     if let Some(p) = pipe {
-        // `take` bounds the read during capture; the `+1` only detects overflow.
-        let mut limited = p.take(MAX_CAPTURE_BYTES.saturating_add(1));
-        let _ = limited.read_to_end(&mut buf);
+        // Bound retained memory, but keep draining after the cap. Stopping the
+        // read at the cap can fill the OS pipe and block a verbose child.
+        let mut reader = p;
+        let mut chunk = [0u8; 16 * 1024];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let remaining = (MAX_CAPTURE_BYTES as usize).saturating_sub(buf.len());
+                    buf.extend_from_slice(&chunk[..n.min(remaining)]);
+                }
+            }
+        }
     }
-    buf.truncate(MAX_CAPTURE_BYTES as usize);
     buf
 }
 

@@ -73,3 +73,36 @@ fn timeout_leaves_runner_usable() {
     let err = missing.run(t.path(), &[]).expect_err("must fail");
     assert!(err.contains("cannot spawn"), "unexpected error: {err}");
 }
+
+#[test]
+fn output_over_capture_limit_is_drained_without_blocking_child() {
+    let t = TempDir::new().unwrap();
+    let init = std::process::Command::new("git")
+        .arg("-C")
+        .arg(t.path())
+        .args(["init", "-q"])
+        .status()
+        .expect("spawn git init");
+    assert!(init.success());
+    let payload = t.path().join("large.bin");
+    std::fs::write(&payload, vec![b'x'; 10 * 1024 * 1024]).unwrap();
+    let oid = std::process::Command::new("git")
+        .arg("-C")
+        .arg(t.path())
+        .args(["hash-object", "-w"])
+        .arg(&payload)
+        .output()
+        .expect("spawn git hash-object");
+    assert!(oid.status.success());
+    let oid = String::from_utf8(oid.stdout).unwrap();
+    let runner = GitRunner {
+        program: "git".to_string(),
+        timeout: Duration::from_secs(5),
+    };
+    let result = runner
+        .run(t.path(), &["cat-file", "blob", oid.trim()])
+        .expect("verbose Git child should finish instead of blocking on a full pipe");
+    assert!(result.success);
+    assert!(result.stdout.len() <= 8 * 1024 * 1024);
+    assert_eq!(result.stdout.first(), Some(&b'x'));
+}
