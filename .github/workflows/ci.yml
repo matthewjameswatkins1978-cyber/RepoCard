@@ -26,5 +26,17 @@ jobs:
       - name: Dogfood JSON parses
         # Portable: no shell redirection, no /tmp, no python3-vs-python.
         # Python drives the subprocess and parses stdout on every runner OS.
+        # Build first so `cargo run` build chatter never pollutes the stderr
+        # assertion: stderr under test must be the binary's alone.
         run: |
-          python -c "import subprocess, json; p = subprocess.run(['cargo', 'run', '--', '.', '--json'], capture_output=True, text=True); d = json.loads(p.stdout); assert d['schema_version'] == 'repocard.v0.1', d; print('dogfood JSON OK:', d['filesystem']['file_count'], 'files')"
+          python -c "import subprocess, json, os; subprocess.run(['cargo', 'build'], check=True); exe = 'target/debug/repocard' + ('.exe' if os.name == 'nt' else ''); p = subprocess.run([exe, '.', '--json'], capture_output=True, text=True); assert p.returncode == 0, p; assert p.stderr == '', repr(p.stderr); d = json.loads(p.stdout); assert d['schema_version'] == 'repocard.v0.1', d; print('dogfood JSON OK:', d['filesystem']['file_count'], 'files')"
+      - name: Dogfood human modes smoke
+        # Piped stdout selects pipe-safe rendering; every preset, details,
+        # plain, motion-never and the write dry-run must exit 0.
+        run: |
+          cargo run -- . --plain
+          cargo run -- . --details --style workwear
+          cargo run -- . --style black-tie
+          cargo run -- . --style studio
+          cargo run -- . --motion never
+          cargo run -- write . --dry-run
