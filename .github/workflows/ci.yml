@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # Bounded work: a hung scan must fail fast with logs, not burn hours.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all-targets --all-features
+      - name: Dogfood JSON parses
+        # Portable: no shell redirection, no /tmp, no python3-vs-python.
+        # Python drives the subprocess and parses stdout on every runner OS.
+        run: |
+          python -c "import subprocess, json; p = subprocess.run(['cargo', 'run', '--', '.', '--json'], capture_output=True, text=True); d = json.loads(p.stdout); assert d['schema_version'] == 'repocard.v0.1', d; print('dogfood JSON OK:', d['filesystem']['file_count'], 'files')"
