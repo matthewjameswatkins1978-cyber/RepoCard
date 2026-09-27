@@ -6,36 +6,18 @@ pub mod languages;
 pub mod project;
 
 use crate::model::{
-    absolutize, relative_display, RepoCardError, RepoSnapshot, RepositoryIdentity, ScanEvent,
+    absolutize, display_root, RepoCardError, RepoSnapshot, RepositoryIdentity, ScanEvent,
     ScanOptions, ScanPhase, WarningSink, SCHEMA_VERSION,
 };
 use std::path::{Path, PathBuf};
 
-pub use git::GitRunner;
+pub use git::{GitAvailability, GitRunner};
 
-/// Scan a directory and produce a RepoSnapshot.
-///
-/// `on_event` is a simple semantic progress sink (the future Sartorial seam).
-pub fn scan<E>(
-    path: &Path,
-    options: &ScanOptions,
-    mut on_event: E,
-) -> Result<RepoSnapshot, RepoCardError>
-where
-    E: FnMut(ScanEvent),
-{
-    let emit = |phase: ScanPhase, message: &str, on_event: &mut E| {
-        on_event(ScanEvent {
-            phase,
-            current: 0,
-            total: None,
-            message: message.to_string(),
-        });
-    };
-
-    // Resolve root.
-    let raw = path;
-    let abs = absolutize(raw);
+/// Validate a scan root with the same semantics everywhere (scan, dry-run,
+/// real write): must exist, must be readable, must be a directory.
+/// Returns the canonical internal path (long-path capable).
+pub fn resolve_scan_root(path: &Path) -> Result<PathBuf, RepoCardError> {
+    let abs = absolutize(path);
     let canon = std::fs::canonicalize(&abs)
         .map_err(|_| RepoCardError::NotFound(abs.to_string_lossy().into_owned()))?;
     let meta = std::fs::metadata(&canon)
@@ -46,19 +28,39 @@ where
             canon.to_string_lossy()
         )));
     }
-    let root: PathBuf = canon.clone();
+    Ok(canon)
+}
+
+/// Scan a directory and produce a RepoSnapshot.
+///
+/// `on_event` is a simple semantic progress sink (the future Sartorial seam).
+/// Exactly one phase sequence is emitted:
+/// Discover, Git, Walk, Languages, Attention, History, Project, Finalize.
+pub fn scan<E>(
+    path: &Path,
+    options: &ScanOptions,
+    mut on_event: E,
+) -> Result<RepoSnapshot, RepoCardError>
+where
+    E: FnMut(ScanEvent),
+{
+    let root = resolve_scan_root(path)?;
     let mut warnings = WarningSink::new(options.warnings_limit);
 
-    emit(ScanPhase::Discover, "discover", &mut on_event);
+    on_event(ScanEvent {
+        phase: ScanPhase::Discover,
+        current: 0,
+        total: None,
+        message: "discover".to_string(),
+    });
 
     let name = root
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| root.to_string_lossy().into_owned());
-    let root_str = root.to_string_lossy().into_owned();
+    // Semantic/display root: canonical internally, no `\\?\` prefix outward.
+    let root_str = display_root(&root);
 
-    // ---- Git ----
-    emit(ScanPhase::Git, "git", &mut on_event);
     let runner = GitRunner::default();
     scan_with_runner(
         &root,
@@ -92,27 +94,33 @@ where
         });
     };
 
-    // Git (optional).
+    // ---- Git (optional; exactly one Git event per scan) ----
     emit(ScanPhase::Git, "git");
-    let git = match git::scan_git(root, runner, warnings) {
-        Some(g) => Some(g),
-        None => {
-            // Distinguish "not a repo / git absent" from hard failure:
-            // scan_git already warned on failure; add factual warning only if
-            // it looks like git is absent or not a repo.
-            let resolve = git::resolve_repo(root, runner);
-            if !resolve.is_repo {
+    let (git, is_git) = match git::availability(root, runner) {
+        GitAvailability::Repo(_) => match git::scan_git(root, runner, warnings) {
+            Some(g) => (Some(g), true),
+            None => {
                 warnings.push(
                     "git",
                     None,
-                    "git unavailable or not a git repository; continuing with filesystem scan"
+                    "git repository detected but status could not be read; continuing with filesystem scan"
                         .to_string(),
                 );
+                (None, true)
             }
-            None
+        },
+        // An ordinary directory is a supported complete target: no warning,
+        // and not partial merely for being non-Git.
+        GitAvailability::NotRepo => (None, false),
+        GitAvailability::Unavailable(detail) => {
+            warnings.push(
+                "git",
+                None,
+                format!("git unavailable ({detail}); continuing with filesystem scan"),
+            );
+            (None, false)
         }
     };
-    let is_git = git.is_some() || git::resolve_repo(root, runner).is_repo;
 
     // ---- Walk ----
     emit(ScanPhase::Walk, "walk");
@@ -165,7 +173,6 @@ where
             "repository root contains non-Unicode data; rendered lossily".to_string(),
         );
     }
-    let _ = relative_display;
 
     let partial = warnings.is_partial();
 

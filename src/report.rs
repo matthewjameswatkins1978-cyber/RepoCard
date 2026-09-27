@@ -38,17 +38,35 @@ pub fn write_report(
     let json = serde_json::to_string_pretty(snapshot)
         .map_err(|e| RepoCardError::Scan(format!("serialize snapshot: {e}")))?;
 
-    // Atomic-ish temp + rename.
+    // Fully produce the new JSON in a sibling temp file first. `write`
+    // returns only once all bytes are on disk (or errors with nothing
+    // partially promised). The final path is then touched exactly once, by
+    // rename. There is deliberately NO fallback to direct overwrite: on
+    // Windows especially, a failed direct write could leave a half-written
+    // final report next to a lost original.
     let tmp = destination.with_extension("json.tmp");
-    std::fs::write(&tmp, json.as_bytes())?;
+    if let Err(e) = std::fs::write(&tmp, json.as_bytes()) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(RepoCardError::Io(format!("write temp report: {e}")));
+    }
     let bytes_written = json.len() as u64;
-    match std::fs::rename(&tmp, destination) {
-        Ok(()) => {}
-        Err(_) => {
-            // Fallback: direct write (cross-device), then remove tmp.
-            std::fs::write(destination, json.as_bytes())?;
+    if destination.exists() {
+        // Windows rename cannot replace an existing file, so remove the old
+        // report first. If removal fails the old report is untouched and the
+        // temp file remains for inspection. If rename then fails, the worst
+        // case is a missing final report plus an intact temp file -- never a
+        // half-written final report.
+        if let Err(e) = std::fs::remove_file(destination) {
             let _ = std::fs::remove_file(&tmp);
+            return Err(RepoCardError::Io(format!(
+                "replace previous report (old report left intact): {e}"
+            )));
         }
+    }
+    if let Err(e) = std::fs::rename(&tmp, destination) {
+        return Err(RepoCardError::Io(format!(
+            "rename temp report into place (final report not half-written; temp may remain): {e}"
+        )));
     }
     Ok(ReportReceipt {
         destination: destination.to_string_lossy().into_owned(),

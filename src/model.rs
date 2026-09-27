@@ -308,6 +308,22 @@ pub fn root_basename(root: &std::path::Path) -> String {
         .unwrap_or_else(|| root.to_string_lossy().into_owned())
 }
 
+/// Display form of the repository root for semantic output.
+///
+/// Keeps the canonical `PathBuf` internally (long-path support intact) but
+/// strips the Windows extended-length `\\?\` implementation detail so users
+/// see a normal path (`D:\repo`, or `\\server\share` for UNC).
+pub fn display_root(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy().into_owned();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    s
+}
+
 pub fn absolutize(p: &std::path::Path) -> PathBuf {
     if p.is_absolute() {
         p.to_path_buf()

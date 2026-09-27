@@ -35,6 +35,8 @@ pub fn walk_source_tree(
         .follow_links(options_follow_symlinks)
         .require_git(false)
         .standard_filters(true);
+    // Same custom ignore file Tokei honours, so both scanners share one universe.
+    builder.add_custom_ignore_filename(".tokeignore");
     builder.filter_entry(|e| {
         let name = e.file_name();
         // Never descend into .git as ordinary source.
@@ -173,11 +175,10 @@ fn is_test_path(rel: &str) -> bool {
 pub fn git_dir_bytes(root: &Path, warnings: &mut WarningSink) -> Option<u64> {
     let dotgit = root.join(".git");
     let meta = std::fs::symlink_metadata(&dotgit).ok()?;
-    if meta.is_file() {
-        // Worktree gitfile pointer; don't chase.
-        return meta.len().into();
-    }
     if !meta.is_dir() {
+        // A worktree `.git` is a gitfile pointer (`gitdir: <path>`), not a
+        // directory. Never report the pointer file's byte length as a
+        // directory size; that would be knowingly misleading.
         return None;
     }
     let mut total: u64 = 0;

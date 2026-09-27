@@ -3,7 +3,7 @@ name = "repocard"
 version = "0.1.0"
 edition = "2021"
 description = "Small, fast repository intelligence card"
-license = "SEE-LICENSE"
+publish = false
 
 [lib]
 name = "repocard"

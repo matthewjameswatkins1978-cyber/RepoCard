@@ -1,10 +1,22 @@
 use crate::model::{code_percent, LanguageSnapshot, LanguageStat, WarningSink};
 
+/// Directories RepoCard excludes from its own source walk. Tokei is given the
+/// same exclusions so language statistics follow RepoCard policy instead of
+/// Tokei defaults.
+const EXCLUDED_DIRS: [&str; 2] = [".git", ".repocard"];
+
 pub fn analyze_languages(root: &std::path::Path, warnings: &mut WarningSink) -> LanguageSnapshot {
-    let config = tokei::Config::default();
+    let config = tokei::Config {
+        // RepoCard policy: hidden files are not source. Set explicitly rather
+        // than relying on Tokei's default, so the universe stays aligned if
+        // defaults move.
+        hidden: Some(false),
+        ..tokei::Config::default()
+    };
     let mut languages = tokei::Languages::new();
-    // get_statistics respects .gitignore internally via ignore crate.
-    languages.get_statistics(&[root.to_path_buf()], &[], &config);
+    // Tokei respects .gitignore/.ignore/excludes internally; `EXCLUDED_DIRS`
+    // additionally keeps report output (and any nested .git) out of stats.
+    languages.get_statistics(&[root.to_path_buf()], &EXCLUDED_DIRS, &config);
 
     // Compact: drop failed? Languages API silently skips unreadable.
     let mut stats: Vec<LanguageStat> = Vec::new();

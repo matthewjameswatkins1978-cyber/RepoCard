@@ -87,15 +87,16 @@ fn cmd_scan(path: PathBuf, as_json: bool, details: bool) {
 }
 
 fn cmd_write(path: PathBuf, output: Option<PathBuf>, dry_run: bool, force: bool) {
-    // Resolve root for destination default.
-    let abs = if path.is_absolute() {
-        path.clone()
-    } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(&path))
-            .unwrap_or_else(|_| path.clone())
+    // Dry-run skips mutation, not validation: resolve the source root with the
+    // same semantics as a real write so a missing/unreadable source can never
+    // yield a plausible-looking plan.
+    let canon = match repocard::scan::resolve_scan_root(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("repocard: error: {e}");
+            std::process::exit(1);
+        }
     };
-    let canon = std::fs::canonicalize(&abs).unwrap_or(abs.clone());
     let dest = output.unwrap_or_else(|| report::default_destination(&canon));
     let dest_abs = if dest.is_absolute() {
         dest.clone()
@@ -104,6 +105,8 @@ fn cmd_write(path: PathBuf, output: Option<PathBuf>, dry_run: bool, force: bool)
             .map(|cwd| cwd.join(&dest))
             .unwrap_or_else(|_| dest.clone())
     };
+    // User-facing destination: same file, without the `\\?\` prefix detail.
+    let dest_abs = PathBuf::from(repocard::display_root(&dest_abs));
     let plan = report::plan_report(&canon, &dest_abs);
     if dry_run {
         println!("ReportPlan:");

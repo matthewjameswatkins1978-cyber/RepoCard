@@ -1,9 +1,12 @@
-use crate::model::{relative_display, GitSnapshot, LatestCommit, ScanWarning, WarningSink};
-use std::collections::HashMap;
+use crate::model::{GitSnapshot, LatestCommit, WarningSink};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 use wait_timeout::ChildExt;
+
+/// Hard cap per captured stream. Enforced *during* capture via `take()`.
+const MAX_CAPTURE_BYTES: u64 = 8 * 1024 * 1024;
 
 /// How to invoke git. Injectable for absence tests.
 #[derive(Debug, Clone)]
@@ -29,26 +32,39 @@ impl GitRunner {
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .stdin(Stdio::null())
             .spawn()
             .map_err(|e| format!("cannot spawn git ({}): {e}", self.program))?;
-        let status = child
-            .wait_timeout(self.timeout)
-            .map_err(|e| format!("git wait error: {e}"))?
-            .ok_or_else(|| "git timed out".to_string())?;
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        if let Some(mut o) = child.stdout.take() {
-            use std::io::Read as _;
-            let _ = o.read_to_end(&mut stdout);
-        }
-        if let Some(mut e) = child.stderr.take() {
-            use std::io::Read as _;
-            let _ = e.read_to_end(&mut stderr);
-        }
-        // Bound captured output.
-        const MAX: usize = 8 * 1024 * 1024;
-        stdout.truncate(MAX);
-        stderr.truncate(MAX);
+        // Drain both pipes on helper threads *while* the parent waits, so a
+        // chatty child can never deadlock against full pipe buffers. Reads are
+        // bounded during capture via `take()`, never truncated after the fact.
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let out_handle = std::thread::spawn(move || drain_capped(stdout_pipe));
+        let err_handle = std::thread::spawn(move || drain_capped(stderr_pipe));
+        let status = match child.wait_timeout(self.timeout) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                // Timeout: kill, then wait to reap. Pipe readers observe EOF
+                // once the child dies, so the joins below always terminate.
+                // No Git process is left behind on any platform.
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_handle.join();
+                let _ = err_handle.join();
+                return Err("git timed out".to_string());
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_handle.join();
+                let _ = err_handle.join();
+                return Err(format!("git wait error: {e}"));
+            }
+        };
+        // Child has exited; pipes are at EOF so joins terminate promptly.
+        let stdout = out_handle.join().unwrap_or_default();
+        let stderr = err_handle.join().unwrap_or_default();
         Ok(GitOutput {
             success: status.success(),
             code: status.code(),
@@ -56,6 +72,18 @@ impl GitRunner {
             stderr,
         })
     }
+}
+
+/// Drain one optional pipe to a bounded buffer. Never blocks the waiter.
+fn drain_capped<R: Read>(pipe: Option<R>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    if let Some(p) = pipe {
+        // `take` bounds the read during capture; the `+1` only detects overflow.
+        let mut limited = p.take(MAX_CAPTURE_BYTES.saturating_add(1));
+        let _ = limited.read_to_end(&mut buf);
+    }
+    buf.truncate(MAX_CAPTURE_BYTES as usize);
+    buf
 }
 
 #[derive(Debug)]
@@ -66,32 +94,32 @@ pub struct GitOutput {
     pub stderr: Vec<u8>,
 }
 
-pub struct GitResolve {
-    pub is_repo: bool,
-    pub root: Option<PathBuf>,
+/// The single semantic authority for Git availability.
+///
+/// - `Repo`: the directory is inside a Git work tree.
+/// - `NotRepo`: Git ran fine but the directory is not a repository. An
+///   ordinary directory is a supported complete target, not an error.
+/// - `Unavailable`: the Git executable could not be run (absent, timeout,
+///   wait failure). Filesystem scanning continues; the snapshot is partial.
+pub enum GitAvailability {
+    Repo(PathBuf),
+    NotRepo,
+    Unavailable(String),
 }
 
-/// Resolve repo root via `git rev-parse --show-toplevel`.
-pub fn resolve_repo(root: &Path, runner: &GitRunner) -> GitResolve {
+/// Classify Git availability via `git rev-parse --show-toplevel`.
+pub fn availability(root: &Path, runner: &GitRunner) -> GitAvailability {
     match runner.run(root, &["rev-parse", "--show-toplevel"]) {
+        Err(e) => GitAvailability::Unavailable(e),
         Ok(o) if o.success => {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
             if s.is_empty() {
-                GitResolve {
-                    is_repo: false,
-                    root: None,
-                }
+                GitAvailability::NotRepo
             } else {
-                GitResolve {
-                    is_repo: true,
-                    root: Some(PathBuf::from(s)),
-                }
+                GitAvailability::Repo(PathBuf::from(s))
             }
         }
-        _ => GitResolve {
-            is_repo: false,
-            root: None,
-        },
+        Ok(_) => GitAvailability::NotRepo,
     }
 }
 
@@ -100,16 +128,15 @@ fn lossy_arg(bytes: &[u8]) -> String {
 }
 
 /// Parse `status --porcelain=v2 -z --branch --show-stash --untracked-files=normal`.
+///
+/// Call only after [`availability`] reports [`GitAvailability::Repo`].
+/// Returns `None` (with a warning) when status cannot be read inside a
+/// repository; the caller keeps repository identity as Git and marks partial.
 pub fn scan_git(
     root: &Path,
     runner: &GitRunner,
     warnings: &mut WarningSink,
 ) -> Option<GitSnapshot> {
-    let resolve = resolve_repo(root, runner);
-    if !resolve.is_repo {
-        return None;
-    }
-
     let out = match runner.run(
         root,
         &[
@@ -174,8 +201,11 @@ pub fn scan_git(
                 &mut renamed,
             );
         } else if record[0] == b'u' {
-            // Unmerged: `u <XY> <subm> <mH> <mI> <mW> <hH> <hI> <path>`
-            if let Some(p) = path_after_spaces(record, 8) {
+            // Unmerged, documented porcelain-v2 schema:
+            // `u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>`
+            // so the path is the remainder after the 10th space. Verified
+            // empirically against git 2.55 (`u UU N... 100644 x3 <hashes> path`).
+            if let Some(p) = path_after_spaces(record, 10) {
                 conflicts.push(p);
             }
         } else if record[0] == b'?' {
@@ -451,16 +481,4 @@ fn query_latest_commit(
         committed_at: parts[2].to_string(),
         subject: parts[3].to_string(),
     })
-}
-
-#[allow(dead_code)]
-pub fn dummy_warning_use(w: &mut WarningSink, root: &Path, p: &Path) {
-    let _ = relative_display(root, p);
-    let _w = ScanWarning {
-        category: "git".into(),
-        path: None,
-        message: String::new(),
-    };
-    let _ = w;
-    let _ = std::collections::HashMap::<String, String>::new() as HashMap<String, String>;
 }

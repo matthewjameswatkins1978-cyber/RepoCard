@@ -128,7 +128,7 @@ fn paths_with_spaces_and_unicode_in_git() {
 }
 
 #[test]
-fn merge_conflict_detected_if_robust() {
+fn merge_conflict_path_required() {
     let t = init_repo();
     fs::write(t.path().join("a.txt"), "base\n").unwrap();
     git(t.path(), &["add", "."]);
@@ -149,9 +149,9 @@ fn merge_conflict_detected_if_robust() {
     let _ = st;
     let s = scan_repo(t.path());
     let g = s.git.unwrap();
-    // Either conflicted or one side won; assert scan didn't crash and state is coherent.
+    // Strict: the conflicted path itself must be reported, not merely dirty state.
     assert!(
-        g.conflict_paths.contains(&"a.txt".to_string()) || !g.clean,
-        "{g:?}"
+        g.conflict_paths.contains(&"a.txt".to_string()),
+        "conflict_paths must name a.txt: {g:?}"
     );
 }

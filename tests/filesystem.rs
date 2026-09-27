@@ -14,6 +14,7 @@ fn empty_directory_scans() {
     assert!(!s.repository.is_git_repository);
     assert!(s.git.is_none());
     assert_eq!(s.schema_version, "repocard.v0.1");
+    assert!(!s.partial);
 }
 
 #[test]
