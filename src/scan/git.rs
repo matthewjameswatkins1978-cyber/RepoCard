@@ -1,5 +1,7 @@
 use crate::model::{GitSnapshot, LatestCommit, WarningSink};
 use std::io::Read;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -26,13 +28,22 @@ impl Default for GitRunner {
 
 impl GitRunner {
     pub fn run(&self, root: &Path, args: &[&str]) -> Result<GitOutput, String> {
-        let mut child = Command::new(&self.program)
-            .arg("-C")
+        let mut cmd = Command::new(&self.program);
+        cmd.arg("-C")
             .arg(root)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .stdin(Stdio::null())
+            .stdin(Stdio::null());
+        #[cfg(unix)]
+        cmd.process_group(0);
+        // Unix: the child leads its own process group, so a timeout kill can
+        // take the whole tree (git re-executes subcommands such as
+        // `git-daemon`, which inherit our pipes; killing only the parent
+        // would leave a grandchild serving forever and the drain joins below
+        // would block forever). Spawn fails if the group cannot be created,
+        // so a later group-kill can never hit our own group.
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("cannot spawn git ({}): {e}", self.program))?;
         // Drain both pipes on helper threads *while* the parent waits, so a
@@ -46,12 +57,12 @@ impl GitRunner {
             Ok(Some(s)) => s,
             Ok(None) => {
                 // Timeout: kill the whole process tree, then wait to reap the
-                // direct child. A plain `kill()` is not enough: on Windows
-                // `git.exe` re-executes subcommands (e.g. `git-daemon.exe`)
-                // which inherit the pipes; killing only the parent would leave
-                // a grandchild serving forever with our pipe ends open, and
-                // the drain joins below would block forever. No Git process is
-                // left behind on any platform.
+                // direct child. A plain `kill()` is not enough: `git`
+                // re-executes subcommands (e.g. `git-daemon`) which inherit
+                // the pipes; killing only the parent would leave a grandchild
+                // serving forever with our pipe ends open, and the drain joins
+                // below would block forever. No Git process is left behind on
+                // any platform.
                 kill_tree(&mut child);
                 let _ = child.wait();
                 let _ = out_handle.join();
@@ -100,6 +111,15 @@ fn kill_tree(child: &mut std::process::Child) {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+    }
+    #[cfg(unix)]
+    {
+        // The child leads its own process group (see `run()`), so this takes
+        // the whole tree including re-exec'd grandchildren. This is the same
+        // mechanism as `timeout -k`.
+        unsafe {
+            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+        }
     }
     let _ = child.kill();
 }
