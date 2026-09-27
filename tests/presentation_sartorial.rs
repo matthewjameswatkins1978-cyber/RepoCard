@@ -355,7 +355,10 @@ fn motion_never_suppresses_animation() {
 #[test]
 fn dry_run_renders_plan_and_writes_nothing() {
     let t = plain_dir();
-    let dest = t.path().join(".repocard").join("report.json");
+    // The binary canonicalizes the root before planning; compare against the
+    // same canonical destination it displays (8.3 aliases, junctions, ...).
+    let canon = std::fs::canonicalize(t.path()).unwrap();
+    let dest = canon.join(".repocard").join("report.json");
     let out = Command::new(bin())
         .arg("write")
         .arg(t.path())
@@ -376,7 +379,8 @@ fn dry_run_renders_plan_and_writes_nothing() {
 #[test]
 fn write_receipt_reflects_actual_result() {
     let t = plain_dir();
-    let dest = t.path().join(".repocard").join("report.json");
+    let canon = std::fs::canonicalize(t.path()).unwrap();
+    let dest = canon.join(".repocard").join("report.json");
     let out = Command::new(bin())
         .arg("write")
         .arg(t.path())
