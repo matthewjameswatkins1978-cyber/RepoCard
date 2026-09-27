@@ -256,7 +256,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.59.0",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
@@ -1160,7 +1160,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "repocard"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aho-corasick",
  "clap",
@@ -1219,8 +1219,8 @@ dependencies = [
 
 [[package]]
 name = "sartorial"
-version = "0.1.0"
-source = "git+https://github.com/matthewjameswatkins1978-cyber/Sartorial?rev=eb44f2300e66d64ff318b24f9e87fb5fad1092b6#eb44f2300e66d64ff318b24f9e87fb5fad1092b6"
+version = "0.2.0"
+source = "git+https://github.com/matthewjameswatkins1978-cyber/Sartorial?rev=2cfbcd16e7c1c90b27310009fddd49101b904331#2cfbcd16e7c1c90b27310009fddd49101b904331"
 dependencies = [
  "anstream 0.6.21",
  "anstyle",
@@ -1698,7 +1698,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

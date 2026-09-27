@@ -34,6 +34,7 @@ jobs:
         # Piped stdout selects pipe-safe rendering; every preset, details,
         # plain, motion-never and the write dry-run must exit 0.
         run: |
+          cargo run -- --version
           cargo run -- . --plain
           cargo run -- . --details --style workwear
           cargo run -- . --style black-tie
