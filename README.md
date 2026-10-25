@@ -1,66 +1,61 @@
-# RepoCard v0.1 — Small, Fast Repository Intelligence Card
+# RepoCard
 
-RepoCard looks at a software repository or ordinary directory and produces one
-compact, bounded, deterministic snapshot of its current state.
+**Know the shape of a repository in one command.**
 
-```
-repocard [PATH] [--json] [--details]
-repocard write [PATH] [--output <PATH>] [--dry-run] [--force]
-```
+RepoCard turns a software checkout, or even an ordinary directory, into a compact, deterministic snapshot: what it is, what tools it uses, what Git knows locally, and where attention may be useful.
 
-## What it does
+It's a Rust CLI for developers and coding agents who need quick orientation **without an AI summary, an index server or a network call**.
 
-One operation answers:
+**Current implementation:** 0.2.0. The machine-readable snapshot contract is still named `repocard.v0.1`; product version and data schema version are separate.
 
-- Where am I? (identity, root, git or plain directory)
-- Git state: branch, commit, dirty/conflicted, ahead/behind (local knowledge only), stash
-- Languages (code-line percentages via Tokei), file/test stats
-- TODO / FIXME / HACK / XXX markers (bounded, no source snippets stored)
-- Largest files, hot files (bounded 200-commit window)
-- CI providers, manifests/toolchains, README/licence, AI/agent guidance files
-- Warnings + `partial` flag when information could not be collected
+## See it work
 
-## Examples
-
-```
+```sh
 repocard .
 repocard . --details
 repocard . --json
-repocard write . --dry-run
-repocard write . --output C:\temp\card.json --force
+repocard . --plain
+repocard . --style workwear --motion never
 ```
 
-`--json` emits ONLY JSON to stdout. Warnings live inside the snapshot.
-Default report: `.repocard/report.json` (refuses overwrite without `--force`).
+The short human display is designed to be readable at a glance. `--details` exposes more context. `--json` emits the snapshot alone for programs and agents, without terminal decoration.
 
-## Deliberately not
+Want a saved report?
 
-Not a linter, reviewer, scorer, package manager, Git replacement, or GitHub
-client. No health score. No AI summaries. No network requests. Default
-operation is read-only (`repocard write` is the only mutating command).
+```sh
+repocard write . --dry-run
+repocard write .
+repocard write . --output ./repository-card.json --force
+```
 
-## Facts and meanings
+A normal scan is read-only. `write` is the explicit mutating command; its default destination is `.repocard/report.json`, and existing reports aren't overwritten without `--force`.
 
-- **Hot files**: paths appearing most often as changed within the sampled
-  history window (default 200 commits, top 10). Churn signal only — not a
-  quality judgement.
-- **Test footprint**: file-level heuristic (`tests/`, `*_test.go`,
-  `test_*.py`, `*.test.*`, `*.spec.*`, …). It counts *test files*, not tests.
-- **Ahead/behind**: reflects local Git knowledge only. RepoCard never fetches.
-- **JSON schema version**: `repocard.v0.1`.
-- **Report write**: plan → serialize → create `.repocard/` → atomic-ish
-  temp+rename → receipt. `--dry-run` prints the plan and writes nothing.
+## What goes on the card?
 
-## Offline / Git-optional
+- Git branch, current commit, local dirty/conflict state, stash and locally known ahead/behind information.
+- Languages and approximate code-line proportions (via Tokei).
+- Bounded test-file counts, TODO/FIXME/HACK/XXX markers and largest files.
+- Frequent-change paths from a bounded local commit history.
+- Project manifests, toolchains, CI hints, README/licence presence and agent guidance files.
+- Warnings and a `partial` flag when a fact couldn't be collected.
 
-Works on ordinary directories. If Git is absent or the directory is not a
-repository, Git state is `null` plus a factual warning; filesystem, language,
-and project facts are still reported.
+**Evidence, not grading.** “Hot files” only means frequently changed files in the sampled history; it isn't a code-quality score. Test footprints count likely test *files*, not test cases. Local Git state is not a substitute for a remote fetch.
 
-## Sartorial
+## Install from source
 
-`RepoSnapshot` is the semantic authority; the scanner knows nothing about
-ANSI, colours, or layout. `ScanEvent` phases (Discover/Git/Walk/Languages/
-Attention/History/Project/Finalize) are the future motion boundary. Adding
-Sartorial later should be `RepoSnapshot -> components` with no scanner
-rewrites.
+Requires a stable Rust toolchain and Git to clone the repository.
+
+```sh
+git clone https://github.com/matthewjameswatkins1978-cyber/RepoCard.git
+cd RepoCard
+cargo install --path .
+repocard --help
+```
+
+The application uses [Sartorial](https://github.com/matthewjameswatkins1978-cyber/Sartorial) for terminal presentation. Choose House (default), Black Tie, Workwear or Studio with `--style`; use `--plain` for pipe-safe text and `--motion never` to suppress live progress.
+
+## Deliberately small
+
+RepoCard does **not** lint or review code, contact GitHub, run an LLM, score repository health or rewrite your files. It also works when Git is unavailable: Git fields are absent and the snapshot explains what couldn't be inspected.
+
+Think of it as a repository's calling card, not its final examination.
